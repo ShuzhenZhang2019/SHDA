@@ -1,0 +1,227 @@
+
+% this code is for SHDA method
+% parameters for all images are uniform.
+
+clc
+close all
+clear;clc;
+
+load('Indian_pines_corrected.mat')
+im1 = indian_pines_corrected;
+[i_row, i_col, i_band] = size(im1);
+im_2d= reshape(im1, i_row*i_col, i_band);
+load('Indian_pines_gt.mat')
+im_gt = indian_pines_gt;
+gt2 = reshape(im_gt,i_row*i_col,1);
+no_classes = 16;
+
+index = [];
+num_class = [];
+for i = 0:1: no_classes
+    index_t =  find(gt2 == i);
+    index = [index index_t'];
+    num_class_t = length(index_t);
+    num_class = [num_class num_class_t];
+end
+sample = 5;
+train_number = ones(1,no_classes)* sample;
+% nu = 30;
+% train_number = [23 nu nu nu nu nu 14 nu 10 nu nu nu nu nu nu nu];
+
+tic;
+nAll = i_row*i_col;
+X = im_2d;   % all samples
+minX = min(X,[],1);  maxX = max(X,[],1);
+data2 = (im_2d - repmat(minX,nAll,1)) ./ repmat( maxX-minX, nAll, 1);
+nr = i_row; nDim = i_band;
+im_3d = zeros(i_row,i_col,i_band);
+for i = 1:i_band
+    im_3d(:,:,i) = reshape(data2(:,i), i_row,i_col);
+end
+%}
+
+% %  calculation for supnum and Sk,
+% BW = edge(img_pca,'sobel',0.05);
+edge_num = 3204; % IndP:3204; PU:12023;  Sa:4035,
+supnum = floor(edge_num*0.04)
+res = 20; % IndP:20, PU:1.3，Sa:3.7
+Sk = floor(((res)^(1/8))*i_row*i_col/supnum-50)
+
+% pca image
+band_num = 10;
+im2 = reshape(im1,i_row*i_col,i_band);
+im22 = im2;
+chengfen=pca(im2);
+img_pca=im22*chengfen(:,1:band_num);
+img_pca=reshape(img_pca,[i_row i_col band_num]);
+img_pca2=zeros(i_row,i_col);
+img_pca2=img_pca(:,:,1);
+img=uint8(255*mat2gray(img_pca2));
+
+% ERS
+labels_supp = ERS_hsi1(img,supnum);
+
+% SWMF for all pixels
+Results_segment= seg_im_class(im_3d,labels_supp);
+Num=size(Results_segment.Y,2);
+for i=1:Num
+    Results_segment.Y{1,i} = findConstruct(Results_segment.Y{1,i},Results_segment.cor{1,i},Sk);
+    SWFhsi(Results_segment.index{1,i},:)=Results_segment.Y{1,i};
+end
+data2 = reshape(SWFhsi,i_row*i_col,i_band);
+
+% training and test samples
+[train_SL,test_SL,test_number]= GenerateSample(im_gt,train_number,no_classes);
+train_id = train_SL(1,:);
+train_label = train_SL(2,:);
+train_sample = data2(train_id,:);
+test_id = test_SL(1,:);
+test_label = gt2;
+test_sample = data2;
+
+nr = i_row; nDim = i_band;
+
+% mean value of each superpixel
+nSupp = max(max(labels_supp));
+sup_img = [];
+for i = 0 : nSupp
+    tmp=find(labels_supp==i);
+    v= data2(tmp,:);
+    meanv=mean(v);
+    sup_img(i+1,:) = meanv;
+end
+
+% local intra-class scatter and local inter-class scatter
+Hw_local = zeros(nDim, nDim);
+Hi = zeros(nDim, nDim);
+s=[i_row,i_col];
+nDim = i_band;
+nSupp = max(max(labels_supp));
+Hi2 = zeros(nDim, nDim);
+Ht_local = zeros(nDim, nDim);  gamma0 = 0.1;
+for i = 0: nSupp
+    tmp=find(labels_supp==i);
+    [M,N]=size(tmp);
+    if M<1
+        continue;
+    end
+    
+    mainclass=labels_supp(tmp);
+    [a,b]=ind2sub(s,tmp);
+    centebrseed=[floor(mean(a)),floor(mean(b))];
+    
+    n1=diag(labels_supp(max(1,a-1),b));
+    n2=diag(labels_supp(min(i_row,a+1),b));
+    n3=diag(labels_supp(a,max(1,b-1)));
+    n4=diag(labels_supp(a,min(i_col,b+1)));
+    
+    a=unique([n1;n2;n3;n4]);
+    centerv=sup_img(i+1,:);
+    mean_local = sup_img(a(:)+1,:);
+    
+    norm_centerv = centerv/norm(centerv);
+    norm_tmp = sqrt(sum(mean_local'.^2));
+    norm_mean_local = mean_local'./repmat(norm_tmp,nDim,1);
+    
+    cor = norm_centerv*norm_mean_local;
+    [val,sort_id] = sort(cor);
+    val_id =  find(val < 0.85);
+    b = a(sort_id(val_id));
+    
+    % local intra-class scatter
+    neightnum = length(b);
+    dtmp =  repmat(centerv,length(tmp),1) - data2(tmp,:);
+    A = sum(dtmp.*dtmp, 2);
+    wei = exp(-gamma0*A);
+    for j = 1:length(tmp)
+        dtmp2 = centerv - data2(tmp(j),:);
+        hi2 = dtmp2'*dtmp2;
+         hij =  1/sum(wei) * wei(j)*hi2; 
+        Hi = Hi + hij;
+    end
+    if neightnum>0
+        Hw_local = Hw_local + Hi * neightnum;
+    else
+        Hw_local = Hw_local + Hi;
+    end
+    
+    % local inter-class scatter
+    if neightnum>0
+        a(a==i)=[];
+        meanv2=sup_img(b(:)+1,:);
+        dtmp =  repmat(centerv,length(b),1) - meanv2;
+        A = sum(dtmp.*dtmp, 2);
+        wei = exp(-gamma0*A);
+        
+        for j = 1:length(b)
+            tmp2 = find(labels_supp==b(j));
+            dtmp2 = centerv - meanv2(j,:);
+            hi2 = dtmp2'*dtmp2;
+            hij =  1/sum(wei) * wei(j)*hi2*length(tmp2);
+            Hi2 = Hi2 + hij;
+        end
+        Ht_local = Ht_local + Hi2;
+    end
+end
+
+% global intra-class and inter-class scatter
+fea = sup_img;
+[nSmp, nFea] = size(fea);
+
+k = 5;
+t = 0.1;
+G1 = zeros(nSmp * (k + 1), 3);
+G2 = zeros(nSmp * (k), 3);
+smpIdx = 1:nSmp;
+dist = EuDist2(fea(smpIdx, :), fea, 0);
+dist = full(dist);
+[val idx] = sort(dist, 2);
+idxw = idx(:, 1:k + 1);
+valw = val(:, 1:k + 1);
+valw = exp(-valw / (2 * t ^ 2));
+G1( 1:nSmp * (k + 1), 1) = repmat(smpIdx', [k + 1, 1]);
+G1(1:nSmp * (k + 1), 2) = idxw(:);
+G1( 1:nSmp * (k + 1), 3) = valw(:);
+
+W1 = sparse(G1(:, 1), G1(:, 2), G1(:, 3), nSmp, nSmp);
+D1 = diag(sum(W1, 2));
+L1 = D1 - W1;
+Hw_glob = fea'* L1 * fea;
+
+idxt = idx(:, (end - k+1):end);
+valt = val(:, (end - k+1):end);
+valt = exp(-valt / (2 * t ^ 2));
+G2( 1:nSmp * (k ), 1) = repmat(smpIdx', [k  , 1]);
+G2(1:nSmp * (k  ), 2) = idxt(:);
+G2( 1:nSmp * (k ), 3) = valt(:);
+
+W2 = sparse(G2(:, 1), G2(:, 2), G2(:, 3), nSmp, nSmp);
+D2 = diag(sum(W2, 2));
+L2 = D2 - W2;
+Ht_glob = fea'* L2 * fea;
+
+alpha = 0.6;  
+XLX1 = (1-alpha)*Hw_glob + alpha*diag(diag(Hw_glob));
+XLX2 =  (1-alpha)*Ht_glob+alpha*fea'*fea ;
+Hw_glob = max(XLX1, XLX1');
+Ht_glob = max(XLX2, XLX2');
+
+% fusion of SLDA and SGDA
+belta = 0.3;
+Ht = belta * Ht_local + (1-belta) * Ht_glob;
+Hw = belta * Hw_local + (1- belta) * Hw_glob;
+Hw = max(Hw, Hw'); Ht = max(Ht, Ht');
+
+dim = 30;
+option = struct('disp', 0);
+[eigvector, Ei] = eigs(Ht, Hw, dim, 'la', option);
+
+Y = train_sample*eigvector;
+YT = test_sample*eigvector;
+
+flag = 1;
+% nn classifier
+[Ytest_label] = KNN_HSI_2( Y',train_label,YT',test_label);
+Result = Ytest_label';
+[OA_nn(flag),kappa_nn(flag),AA_nn(flag),CA_nn(:,flag)] = calcError(test_label(test_id)'-1, Result(test_id)'-1, 1: no_classes);
+OA_nn(flag) = OA_nn(flag)
