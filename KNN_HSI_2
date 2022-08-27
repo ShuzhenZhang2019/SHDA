@@ -1,0 +1,12 @@
+ function [Ytest_label] = KNN_HSI_2( Ytrain,train_label,Ytest,test_label)
+[row_test col_test] = size(Ytest);
+[row_train col_train] = size(Ytrain);
+Ytest_label = [];
+for i = 1:col_test
+  Y = Ytest(:,i);                       
+  Y_test = repmat(Y,1,col_train);
+  error_test = Ytrain - Y_test; % 第i个测试样本与所有训练样本的差值
+  temp = sum(error_test.^2);
+  ind = find (temp == min(temp));
+  Ytest_label = [Ytest_label train_label(ind(1))];
+end
